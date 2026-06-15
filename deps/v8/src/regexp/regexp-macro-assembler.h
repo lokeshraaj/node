@@ -9,7 +9,7 @@
 
 #include "src/base/strings.h"
 #include "src/execution/frame-constants.h"
-#include "src/objects/fixed-array.h"
+#include "src/objects/fixed-primitive-array.h"
 #include "src/regexp/regexp-ast.h"
 #include "src/regexp/regexp.h"
 
@@ -20,6 +20,8 @@ class ByteArray;
 class JSRegExp;
 class Label;
 class String;
+
+namespace regexp {
 
 static const base::uc32 kLeadSurrogateStart = 0xd800;
 static const base::uc32 kLeadSurrogateEnd = 0xdbff;
@@ -52,8 +54,11 @@ class RegExpMacroAssembler {
   RegExpMacroAssembler(const RegExpMacroAssembler& other) V8_NOEXCEPT = default;
   virtual ~RegExpMacroAssembler() = default;
 
-  virtual DirectHandle<HeapObject> GetCode(DirectHandle<String> source,
-                                           RegExpFlags flags) = 0;
+  virtual DirectHandle<HeapObject> GetCode(DirectHandle<RegExpData> re_data,
+                                           Flags flags) = 0;
+
+  void LogCode(Isolate* isolate, DirectHandle<Code> code,
+               DirectHandle<RegExpData> re_data, Flags flags);
 
   // This function is called when code generation is aborted, so that
   // the assembler could clean up internal data structures.
@@ -233,6 +238,9 @@ class RegExpMacroAssembler {
   // Check that we are not in the middle of a surrogate pair.
   void CheckNotInSurrogatePair(int cp_offset, Label* on_failure);
 
+  // Step forward by 1 character/code point in the unanchored search loop.
+  void UnanchoredAdvance(bool unicode, Label* on_failure);
+
 #define IMPLEMENTATIONS_LIST(V) \
   V(IA32)                       \
   V(ARM)                        \
@@ -287,10 +295,6 @@ class RegExpMacroAssembler {
   // Called from generated code.
   static uint32_t IsCharacterInRangeArray(uint32_t current_char,
                                           Address raw_byte_array);
-
-  // Controls the generation of large inlined constants in the code.
-  virtual void set_slow_safe(bool ssc) { slow_safe_compiler_ = ssc; }
-  bool slow_safe() const { return slow_safe_compiler_; }
 
   // Controls after how many backtracks irregexp should abort execution.  If it
   // can fall back to the experimental engine (see `set_can_fallback`), it will
@@ -354,7 +358,6 @@ class RegExpMacroAssembler {
   static const uint8_t word_character_map_[kWordCharacterMapSize];
 
  private:
-  bool slow_safe_compiler_;
   uint32_t backtrack_limit_;
   bool can_fallback_ = false;
   GlobalMode global_mode_;
@@ -363,7 +366,7 @@ class RegExpMacroAssembler {
   const Mode mode_;
 };
 
-class NativeRegExpMacroAssembler: public RegExpMacroAssembler {
+class NativeRegExpMacroAssembler : public RegExpMacroAssembler {
  public:
   // Result of calling generated native RegExp code.
   // RETRY: Something significant changed during execution, and the matching
@@ -438,6 +441,7 @@ class NativeRegExpMacroAssembler: public RegExpMacroAssembler {
       range_array_cache_;
 };
 
+}  // namespace regexp
 }  // namespace internal
 }  // namespace v8
 

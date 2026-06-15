@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+@cppScope('CallSiteInfo')
 bitfield struct CallSiteInfoFlags extends uint31 {
   is_wasm: bool: 1 bit;
   is_asm_js_wasm: bool: 1 bit;  // Implies that is_wasm bit is set.
@@ -14,6 +15,11 @@ bitfield struct CallSiteInfoFlags extends uint31 {
 
   // whether offset_or_source_position contains the source position.
   is_source_position_computed: bool: 1 bit;
+
+  // Only meaningful in raw capture arrays, stripped before creating
+  // CallSiteInfo objects.  Indicates the entry stores a Code + raw PC offset
+  // that needs resolution to a BytecodeArray + bytecode offset.
+  is_deferred_baseline_frame: bool: 1 bit;
 }
 
 @cppObjectLayoutDefinition
@@ -25,5 +31,4 @@ extern class CallSiteInfo extends Struct {
   function: JSFunction|Smi;
   code_offset_or_source_position: Smi;
   flags: SmiTagged<CallSiteInfoFlags>;
-  parameters: FixedArray;
 }

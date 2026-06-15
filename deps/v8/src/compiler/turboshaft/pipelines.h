@@ -19,19 +19,21 @@
 #include "src/compiler/turboshaft/debug-feature-lowering-phase.h"
 #include "src/compiler/turboshaft/decompression-optimization-phase.h"
 #include "src/compiler/turboshaft/instruction-selection-phase.h"
+#include "src/compiler/turboshaft/load-elimination-phase.h"
 #include "src/compiler/turboshaft/loop-peeling-phase.h"
 #include "src/compiler/turboshaft/loop-unrolling-phase.h"
 #include "src/compiler/turboshaft/machine-lowering-phase.h"
-#include "src/compiler/turboshaft/optimize-phase.h"
+#include "src/compiler/turboshaft/memory-optimization-phase.h"
 #include "src/compiler/turboshaft/phase.h"
+#include "src/compiler/turboshaft/random-rescheduling-phase.h"
 #include "src/compiler/turboshaft/register-allocation-phase.h"
 #include "src/compiler/turboshaft/sidetable.h"
-#include "src/compiler/turboshaft/store-store-elimination-phase.h"
 #include "src/compiler/turboshaft/tracing.h"
 #include "src/compiler/turboshaft/turbolev-frontend-pipeline.h"
 #include "src/compiler/turboshaft/turbolev-graph-builder.h"
 #include "src/compiler/turboshaft/type-assertions-phase.h"
 #include "src/compiler/turboshaft/typed-optimizations-phase.h"
+#include "src/init/isolate-group.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/compiler/turboshaft/wasm-in-js-inlining-phase.h"
@@ -99,6 +101,9 @@ class V8_EXPORT_PRIVATE Pipeline {
     Phase phase;
     using result_t =
         decltype(phase.Run(data_, temp_zone, std::forward<Args>(args)...));
+
+    SYNCHRONIZATION_POINT_FOR_TESTING(Phase::synchronization_point_name());
+
     if constexpr (std::is_same_v<result_t, void>) {
       phase.Run(data_, temp_zone, std::forward<Args>(args)...);
       if constexpr (produces_printable_graph<Phase>::value) {
@@ -212,8 +217,10 @@ class V8_EXPORT_PRIVATE Pipeline {
     // complete and cleaned-up, move its reducer into the beginning of the
     // `MachineLoweringPhase` since we can reuse the `DataViewLoweringReducer`
     // there and avoid a separate phase.
-    if (v8_flags.turboshaft_wasm_in_js_inlining ||
-        v8_flags.turbolev_inline_js_wasm_wrappers) {
+    if ((v8_flags.wasm_in_js_inlining_body ||
+         v8_flags.wasm_in_js_inlining_wrapper) &&
+        data_->turbolev_graph_has_inlineable_wasm_calls()) {
+      DCHECK(v8_flags.turbolev);
       RUN_MAYBE_ABORT(turboshaft::WasmInJSInliningPhase);
     }
 #endif  // !V8_ENABLE_WEBASSEMBLY
@@ -224,11 +231,13 @@ class V8_EXPORT_PRIVATE Pipeline {
       RUN_MAYBE_ABORT(turboshaft::LoopUnrollingPhase);
     }
 
-    if (v8_flags.turbo_store_elimination) {
-      RUN_MAYBE_ABORT(turboshaft::StoreStoreEliminationPhase);
-    }
+    RUN_MAYBE_ABORT(turboshaft::LoadEliminationPhase);
 
-    RUN_MAYBE_ABORT(turboshaft::OptimizePhase);
+    RUN_MAYBE_ABORT(turboshaft::MemoryOptimizationPhase);
+
+    if (v8_flags.turboshaft_random_rescheduling) {
+      RUN_MAYBE_ABORT(turboshaft::RandomReschedulingPhase);
+    }
 
     if (v8_flags.turboshaft_typed_optimizations) {
       RUN_MAYBE_ABORT(turboshaft::TypedOptimizationsPhase);
@@ -381,6 +390,17 @@ class V8_EXPORT_PRIVATE Pipeline {
 
     // Verify the instruction sequence has the same hash in two stages.
     VerifyGeneratedCodeIsIdempotent();
+
+#ifdef BUILTIN_BLOCK_POSITION
+    if (V8_UNLIKELY(data_->pipeline_kind() == TurboshaftPipelineKind::kCSA ||
+                    data_->pipeline_kind() ==
+                        TurboshaftPipelineKind::kTSABuiltin)) {
+      if (data_->has_graph() && data_->graph().has_profile()) {
+        RUN_MAYBE_ABORT(BlockPositioningPhase);
+        TraceSequence("after block positioning");
+      }
+    }
+#endif
 
     RUN_MAYBE_ABORT(FrameElisionPhase);
 

@@ -24,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -475,16 +476,16 @@ TEST(InlinedVectorTest, MoveOnly) {
   v.emplace(v.begin(), MoveOnly{});
 }
 TEST(InlinedVectorTest, Noexcept) {
-  EXPECT_TRUE(std::is_nothrow_move_constructible<IntVec>::value);
-  EXPECT_TRUE((std::is_nothrow_move_constructible<
-               absl::InlinedVector<MoveOnly, 2>>::value));
+  EXPECT_TRUE(std::is_nothrow_move_constructible_v<IntVec>);
+  EXPECT_TRUE(
+      (std::is_nothrow_move_constructible_v<absl::InlinedVector<MoveOnly, 2>>));
 
   struct MoveCanThrow {
     MoveCanThrow(MoveCanThrow&&) {}
   };
   EXPECT_EQ(absl::default_allocator_is_nothrow::value,
-            (std::is_nothrow_move_constructible<
-                absl::InlinedVector<MoveCanThrow, 2>>::value));
+            (std::is_nothrow_move_constructible_v<
+                absl::InlinedVector<MoveCanThrow, 2>>));
 }
 
 TEST(InlinedVectorTest, EmplaceBack) {
@@ -823,7 +824,7 @@ class NotTriviallyDestructible {
       : p_(new int(*other.p_)) {}
 
   NotTriviallyDestructible& operator=(const NotTriviallyDestructible& other) {
-    p_ = absl::make_unique<int>(*other.p_);
+    p_ = std::make_unique<int>(*other.p_);
     return *this;
   }
 
@@ -1995,7 +1996,7 @@ TEST(AllocatorSupportTest, SizeAllocConstructor) {
 TEST(InlinedVectorTest, MinimumAllocatorCompilesUsingTraits) {
   using T = int;
   using A = std::allocator<T>;
-  using ATraits = absl::allocator_traits<A>;
+  using ATraits = std::allocator_traits<A>;
 
   struct MinimumAllocator {
     using value_type = T;

@@ -1757,7 +1757,8 @@ int CountBuiltins() {
   int counter = 0;
   for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (Tagged<Code> code; TryCast(obj, &code)) {
+    if (Is<Code>(obj)) {
+      Tagged<Code> code = TrustedCast<Code>(obj);
       if (code->kind() == CodeKind::BUILTIN) counter++;
     }
   }
@@ -4578,12 +4579,13 @@ UNINITIALIZED_TEST(SerializeContextData) {
         // provided), but in the wide pointer case we don't actually know
         // whether it's a pointer or a Smi, so we just let these values pass
         // through.
-        if (V8_ENABLE_SANDBOX_BOOL)
+        if (V8_ENABLE_SANDBOX_BOOL) {
           CHECK_NULL(
               context->GetAlignedPointerFromEmbedderData(1, kRawDataTag));
-        else
+        } else {
           CHECK_EQ(raw_data,
                    context->GetAlignedPointerFromEmbedderData(1, kRawDataTag));
+        }
       }
       isolate->Dispose();
     }
@@ -4661,10 +4663,11 @@ UNINITIALIZED_TEST(SerializeApiWrapperData) {
           object_template->NewInstance(context).ToLocalChecked();
       wrappable1 = cppgc::MakeGarbageCollected<DummyWrappable>(
           cpp_heap->GetAllocationHandle());
-      v8::Object::Wrap<v8::CppHeapPointerTag::kDefaultTag>(isolate, obj1,
-                                                           wrappable1);
-      CHECK_EQ(wrappable1, v8::Object::Unwrap<CppHeapPointerTag::kDefaultTag>(
-                               isolate, obj1));
+      v8::Object::Wrap<v8::CppHeapPointerTag::kTagForTesting>(isolate, obj1,
+                                                              wrappable1);
+      CHECK_EQ(
+          wrappable1,
+          v8::Object::Unwrap<CppHeapPointerTag::kTagForTesting>(isolate, obj1));
       CHECK(context->Global()->Set(context, v8_str("obj1"), obj1).FromJust());
 
       v8::Local<v8::Object> obj2 =
@@ -4672,10 +4675,11 @@ UNINITIALIZED_TEST(SerializeApiWrapperData) {
       wrappable2 = cppgc::MakeGarbageCollected<DummyWrappable>(
           cpp_heap->GetAllocationHandle());
       wrappable2->is_special = true;
-      v8::Object::Wrap<v8::CppHeapPointerTag::kDefaultTag>(isolate, obj2,
-                                                           wrappable2);
-      CHECK_EQ(wrappable2, v8::Object::Unwrap<CppHeapPointerTag::kDefaultTag>(
-                               isolate, obj2));
+      v8::Object::Wrap<v8::CppHeapPointerTag::kTagForTesting>(isolate, obj2,
+                                                              wrappable2);
+      CHECK_EQ(
+          wrappable2,
+          v8::Object::Unwrap<CppHeapPointerTag::kTagForTesting>(isolate, obj2));
       CHECK(context->Global()->Set(context, v8_str("obj2"), obj2).FromJust());
 
       creator.SetDefaultContext(context, SerializeInternalFieldsCallback(),
@@ -5217,6 +5221,124 @@ UNINITIALIZED_TEST(SnapshotCreatorIncludeGlobalProxy) {
         }
 
         CHECK(context2->Global()->Equals(context2, global).FromJust());
+      }
+    }
+    isolate->Dispose();
+  }
+  delete[] blob.data;
+  FreeCurrentEmbeddedBlob();
+}
+
+namespace {
+v8::Local<v8::String> GetGlobalObjectConstructorName(
+    v8::Isolate* isolate, v8::Local<v8::Context> context) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  i::DirectHandle<i::Context> i_context = v8::Utils::OpenDirectHandle(*context);
+  i::DirectHandle<i::JSGlobalObject> i_global_object(i_context->global_object(),
+                                                     i_isolate);
+  return v8::Utils::ToLocal(
+      i::JSReceiver::GetConstructorName(i_isolate, i_global_object));
+}
+
+}  // namespace
+
+UNINITIALIZED_TEST(SnapshotCreatorGlobalProxyNameAlignment) {
+  DisableEmbeddedBlobRefcounting();
+  v8::StartupData blob;
+
+  // 1. Create a context snapshot with a global having a non-default name.
+  {
+    SnapshotCreatorParams testing_params(original_external_references);
+    v8::SnapshotCreator creator(testing_params.create_params);
+    v8::Isolate* isolate = creator.GetIsolate();
+    {
+      v8::HandleScope handle_scope(isolate);
+
+      // Create global object template with custom class name.
+      v8::Local<v8::FunctionTemplate> global_object_constructor =
+          v8::FunctionTemplate::New(isolate);
+      global_object_constructor->SetClassName(v8_str("ObjectClassSnapshot"));
+      v8::Local<v8::ObjectTemplate> global_template =
+          global_object_constructor->InstanceTemplate();
+
+      v8::Local<v8::Context> context =
+          v8::Context::New(isolate, nullptr, global_template);
+      v8::Context::Scope context_scope(context);
+
+      v8::Local<v8::Object> global_proxy = context->Global();
+
+      // Make sure global proxy inherited the class name from the global
+      // object template.
+      CHECK(global_proxy->GetConstructorName()
+                ->Equals(context, v8_str("ObjectClassSnapshot"))
+                .FromJust());
+      CHECK(GetGlobalObjectConstructorName(isolate, context)
+                ->Equals(context, v8_str("ObjectClassSnapshot"))
+                .FromJust());
+
+      CHECK_EQ(0u, creator.AddContext(context));
+      creator.SetDefaultContext(context);
+    }
+    blob =
+        creator.CreateBlob(v8::SnapshotCreator::FunctionCodeHandling::kClear);
+  }
+
+  // 2. Deserialize and check the global proxy's class name.
+  {
+    v8::Isolate::CreateParams params;
+    params.snapshot_blob = &blob;
+    params.array_buffer_allocator = CcTest::array_buffer_allocator();
+    params.external_references = original_external_references;
+    v8::Isolate* isolate = TestSerializer::NewIsolate(params);
+    {
+      v8::Isolate::Scope isolate_scope(isolate);
+      v8::HandleScope handle_scope(isolate);
+
+      // Create a context with a DIFFERENT global template name.
+      v8::Local<v8::Object> global_proxy;
+      {
+        v8::Local<v8::FunctionTemplate> global_object_constructor =
+            v8::FunctionTemplate::New(isolate);
+        global_object_constructor->SetClassName(v8_str("AnotherObjectClass"));
+        v8::Local<v8::ObjectTemplate> global_template =
+            global_object_constructor->InstanceTemplate();
+
+        v8::Local<v8::Context> context =
+            v8::Context::New(isolate, nullptr, global_template);
+        v8::Context::Scope context_scope(context);
+
+        global_proxy = context->Global();
+
+        // Verify it has the class name.
+        CHECK(global_proxy->GetConstructorName()
+                  ->Equals(context, v8_str("AnotherObjectClass"))
+                  .FromJust());
+
+        context->DetachGlobal();
+      }
+
+      // Now create a new context from snapshot, reusing the global proxy.
+      v8::ExtensionConfiguration* no_extensions = nullptr;
+      v8::Local<v8::Context> context =
+          v8::Context::FromSnapshot(isolate, 0,
+                                    v8::DeserializeInternalFieldsCallback(),
+                                    no_extensions, global_proxy)
+              .ToLocalChecked();
+
+      {
+        v8::Context::Scope context_scope(context);
+
+        // The new context must get the same global proxy.
+        CHECK(context->Global()->Equals(context, global_proxy).FromJust());
+
+        // Both global proxy and global object should now have the class name
+        // from the snapshot.
+        CHECK(global_proxy->GetConstructorName()
+                  ->Equals(context, v8_str("ObjectClassSnapshot"))
+                  .FromJust());
+        CHECK(GetGlobalObjectConstructorName(isolate, context)
+                  ->Equals(context, v8_str("ObjectClassSnapshot"))
+                  .FromJust());
       }
     }
     isolate->Dispose();
@@ -6070,14 +6192,15 @@ UNINITIALIZED_TEST(ClassFieldsWithBindings) {
 }
 
 void CheckInfosAreWeak(Tagged<WeakFixedArray> sfis, Isolate* isolate) {
-  CHECK_GT(sfis->length(), 0);
+  const uint32_t sfis_len = sfis->length().value();
+  CHECK_GT(sfis_len, 0);
   int no_of_weak = 0;
-  for (int i = 0; i < sfis->length(); ++i) {
+  for (uint32_t i = 0; i < sfis_len; ++i) {
     Tagged<MaybeObject> maybe_object = sfis->get(i);
     Tagged<HeapObject> heap_object;
     CHECK(!maybe_object.GetHeapObjectIfWeak(isolate, &heap_object) ||
           (maybe_object.GetHeapObjectIfStrong(&heap_object) &&
-           IsUndefined(heap_object, isolate)) ||
+           IsUndefined(heap_object)) ||
           Is<SharedFunctionInfo>(heap_object) || Is<ScopeInfo>(heap_object));
     if (maybe_object.IsWeak()) {
       ++no_of_weak;
